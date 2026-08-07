@@ -1,40 +1,49 @@
-"""Telemetry compatibility helpers for Solar of Things devices.
+"""Inverter-specific telemetry collection and normalisation.
 
-Siseli protocol profiles do not all expose the same attribute keys.  This
-module requests the common aliases and normalises them to the stable keys used
-by the Home Assistant sensor platform.
+This fork targets gather protocol version 493332949100363776 (protocol code
+44).  The protocol advertises 162 state attributes.  Every advertised key is
+requested and kept in ``raw`` while a small set of canonical values is derived
+for the existing Home Assistant energy entities.
 """
 from __future__ import annotations
 
+import json
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from .const import API_TIME_SERIES
 
+PROTOCOL_SCHEMA: dict[str, dict[str, Any]] = json.loads(
+    Path(__file__).with_name("protocol_schema.json").read_text(encoding="utf-8")
+)
+TELEMETRY_KEYS: tuple[str, ...] = tuple(PROTOCOL_SCHEMA)
 
-TELEMETRY_KEYS = [
-    # PV power: legacy integrations and newer protocol profiles.
-    "pvInputPower",
-    "pvPower",
-    "generationPower",
-    # AC output / home load.
-    "acOutputActivePower",
-    "outputActivePower",
-    # Battery telemetry.
-    "batteryDischargeCurrent",
-    "batteryChargingCurrent",
-    "batteryVoltage",
-    "batterySOC",
-    "batteryCapacity",
-    # Grid import/export.
-    "feedInPower",
-    "mainsPower",
-    "mainsCurrentFlowDirection",
-]
+# Keep requests small enough for the Siseli history endpoint while still
+# collecting the complete protocol on every coordinator refresh.
+TELEMETRY_BATCH_SIZE = 40
+
+
+def _chunks(values: tuple[str, ...], size: int):
+    for index in range(0, len(values), size):
+        yield values[index : index + size]
+
+
+def _latest_sample(value: Any) -> Any:
+    """Extract the latest scalar from the possible history response shapes."""
+    if isinstance(value, list):
+        if not value:
+            return None
+        value = value[-1]
+
+    if isinstance(value, dict):
+        for key in ("value", "v", "data"):
+            if key in value:
+                return value[key]
+    return value
 
 
 def _as_float(value: Any) -> float | None:
-    """Return a numeric value, or ``None`` when it cannot be converted."""
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -44,114 +53,103 @@ def _as_float(value: Any) -> float | None:
 
 
 def _first_float(values: dict[str, Any], *keys: str) -> float | None:
-    """Return the first present numeric key, preserving valid zero values."""
     for key in keys:
-        value = _as_float(values.get(key))
-        if value is not None:
-            return value
+        parsed = _as_float(values.get(key))
+        if parsed is not None:
+            return parsed
     return None
 
 
-def _normalise_telemetry(values: dict[str, Any]) -> dict[str, Any]:
-    """Normalise protocol-specific fields to the integration sensor keys."""
-    normalised: dict[str, Any] = {}
+def _canonical_values(raw: dict[str, Any]) -> dict[str, Any]:
+    """Build stable, dashboard-friendly values from protocol-code-44 fields."""
+    canonical: dict[str, Any] = {}
 
-    # Legacy pvInputPower is already treated as watts by the integration.
-    pv_watts = _first_float(values, "pvInputPower")
-    if pv_watts is None:
-        pv_kw = _first_float(values, "pvPower", "generationPower")
-        if pv_kw is not None:
-            pv_watts = pv_kw * 1000.0
-    if pv_watts is not None:
-        normalised["pvInputPower"] = pv_watts
+    pv_kw = _first_float(raw, "pvPower", "generationPower")
+    if pv_kw is not None:
+        canonical["pvInputPower"] = pv_kw * 1000.0
 
-    # Both output power aliases are reported in kW by Siseli.
-    output_kw = _first_float(values, "acOutputActivePower", "outputActivePower")
+    output_kw = _first_float(raw, "outputActivePower")
     if output_kw is not None:
         output_watts = output_kw * 1000.0
-        normalised["acOutputActivePower"] = output_watts
-        normalised["loadPower"] = output_watts
+        canonical["acOutputActivePower"] = output_watts
+        canonical["loadPower"] = output_watts
 
-    voltage = _first_float(values, "batteryVoltage")
-    charge = _first_float(values, "batteryChargingCurrent")
-    discharge = _first_float(values, "batteryDischargeCurrent")
-    soc = _first_float(values, "batterySOC", "batteryCapacity")
+    voltage = _first_float(raw, "batteryVoltage")
+    charge = _first_float(raw, "batteryChargingCurrent", "bmsChargingCurrent")
+    discharge = _first_float(raw, "batteryDischargeCurrent", "bmsDischargeCurrent")
+    soc = _first_float(raw, "batteryCapacity", "bmsCurrentSOC")
 
     if voltage is not None:
-        normalised["batteryVoltage"] = voltage
+        canonical["batteryVoltage"] = voltage
     if charge is not None:
-        normalised["batteryChargingCurrent"] = charge
+        canonical["batteryChargingCurrent"] = charge
     if discharge is not None:
-        normalised["batteryDischargeCurrent"] = discharge
+        canonical["batteryDischargeCurrent"] = discharge
     if soc is not None:
-        normalised["batterySOC"] = soc
+        canonical["batterySOC"] = soc
 
-    # Positive batteryPower means discharge; negative means charging.
     if voltage is not None and (charge is not None or discharge is not None):
-        normalised["batteryPower"] = (
+        canonical["batteryPower"] = (
             (discharge or 0.0) - (charge or 0.0)
         ) * voltage
 
-    mains_kw = _first_float(values, "mainsPower")
-    direction = values.get("mainsCurrentFlowDirection")
-
+    mains_kw = _first_float(raw, "mainsPower")
+    direction = raw.get("mainsCurrentFlowDirection")
     if mains_kw is not None:
         mains_watts = abs(mains_kw) * 1000.0
         if direction == "-" or (direction not in ("+", "-") and mains_kw < 0):
-            normalised["gridPower"] = 0.0
-            normalised["feedInPower"] = mains_watts
+            canonical["gridPower"] = 0.0
+            canonical["feedInPower"] = mains_watts
         else:
-            normalised["gridPower"] = mains_watts
-            normalised["feedInPower"] = 0.0
-    else:
-        # Retain the legacy feed-in field when this protocol has no mainsPower.
-        feed_in = _first_float(values, "feedInPower")
-        if feed_in is not None:
-            normalised["feedInPower"] = max(0.0, feed_in)
+            canonical["gridPower"] = mains_watts
+            canonical["feedInPower"] = 0.0
 
-        # Estimate import only when the required readings are available.
-        pv = _as_float(normalised.get("pvInputPower"))
-        load = _as_float(normalised.get("loadPower"))
-        battery = _as_float(normalised.get("batteryPower"))
-        if load is not None and pv is not None:
-            normalised["gridPower"] = max(
-                0.0,
-                load - pv - (battery or 0.0) + (feed_in or 0.0),
-            )
-
-    return normalised
+    return canonical
 
 
 def fetch_latest_telemetry(api: Any, device_id: str) -> dict[str, Any]:
-    """Fetch and normalise the latest readings for one device."""
+    """Fetch every state attribute advertised by this inverter protocol."""
     end_time = api._now()
     start_time = end_time - timedelta(hours=1)
+    raw: dict[str, Any] = {}
+    errors: list[str] = []
 
-    data = api._post(
-        API_TIME_SERIES,
-        {
-            "deviceId": device_id,
-            "count": 2000,
-            "page": 1,
-            "fromTime": api._format_time(start_time),
-            "toTime": api._format_time(end_time),
-            "orderByTimeAsc": True,
-            "keys": TELEMETRY_KEYS,
-        },
-    )
+    for keys in _chunks(TELEMETRY_KEYS, TELEMETRY_BATCH_SIZE):
+        try:
+            data = api._post(
+                API_TIME_SERIES,
+                {
+                    "deviceId": device_id,
+                    "count": 2000,
+                    "page": 1,
+                    "fromTime": api._format_time(start_time),
+                    "toTime": api._format_time(end_time),
+                    "orderByTimeAsc": True,
+                    "keys": list(keys),
+                },
+            )
 
-    if data.get("code") not in (0, None):
-        raise RuntimeError(
-            f"Timeseries error code={data.get('code')} "
-            f"message={data.get('message')}"
-        )
+            if data.get("code") not in (0, None, "0"):
+                raise RuntimeError(
+                    f"code={data.get('code')} message={data.get('message')}"
+                )
 
-    payload = (data.get("data") or {}).get("payload") or {}
-    fields = payload.get("fields") or {}
+            payload = (data.get("data") or {}).get("payload") or {}
+            fields = payload.get("fields") or {}
+            if not isinstance(fields, dict):
+                continue
 
-    latest_values: dict[str, Any] = {}
-    for key, samples in fields.items():
-        if isinstance(samples, list) and samples:
-            latest_values[key] = samples[-1]
+            for key, samples in fields.items():
+                latest = _latest_sample(samples)
+                if latest is not None:
+                    raw[key] = latest
+        except Exception as err:
+            errors.append(f"{list(keys)!r}: {err}")
 
-    return _normalise_telemetry(latest_values)
+    if not raw and errors:
+        raise RuntimeError("All telemetry batches failed: " + "; ".join(errors))
+
+    return {
+        "raw": raw,
+        "canonical": _canonical_values(raw),
+    }
