@@ -1,27 +1,4 @@
-"""The Solar of Things integration.
-
-Authentication notes
-────────────────────
-The integration supports two modes:
-
-  Email + Password (MODE_PASSWORD):
-    • api.login() is called at setup → obtains accessToken + refreshToken.
-    • _ensure_token_valid() is called before every API request; it proactively
-      refreshes the token 5 minutes before expiry using the refresh-token
-      endpoint, and falls back to re-login with stored credentials if the
-      refresh token is also expired.
-    • on_token_refreshed callback updates the config entry with fresh tokens so
-      the state survives HA restarts without having to re-login every time.
-
-  Legacy IOT-Token (MODE_TOKEN):
-    • The stored token is used as-is.
-    • On 401 / TokenExpiredError, the coordinator raises UpdateFailed and also
-      calls entry.async_start_reauth() so the user is prompted for a fresh token.
-
-Version history
-────────────────
-  v2.3.0 – user-id/password auth (replacing email), working IOT-Open signing
-"""
+"""The Solar of Things integration."""
 from __future__ import annotations
 
 import logging
@@ -51,15 +28,13 @@ from .telemetry import fetch_latest_telemetry
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.NUMBER, Platform.SELECT, Platform.SWITCH]
+# This inverter-specific fork is deliberately read-only. All telemetry and
+# readable parameter values are exposed as sensors; no commands are sent.
+PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 DEVICE_UPDATE_INTERVAL = timedelta(minutes=5)
 STATION_UPDATE_INTERVAL = timedelta(minutes=30)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry setup / teardown
-# ──────────────────────────────────────────────────────────────────────────────
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Solar of Things from a config entry."""
@@ -69,19 +44,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     user_id = entry.data.get(CONF_USER_ID)
     password = entry.data.get(CONF_PASSWORD)
 
-    # Build the token-refreshed callback *before* constructing the API so the
-    # callback reference is captured.
-    # NOTE: this callback is invoked from a background executor thread (inside
-    # api.login / api.refresh_access_token).  async_update_entry must only be
-    # called from the event loop, so we schedule it with call_soon_threadsafe.
     def _on_token_refreshed(
         access_token: str,
         refresh_token: str,
         access_expires: str,
         refresh_expires: str,
     ) -> None:
-        """Persist refreshed token back to the config entry (thread-safe)."""
-
         @callback
         def _update() -> None:
             hass.config_entries.async_update_entry(
@@ -94,14 +62,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     CONF_REFRESH_TOKEN_EXPIRES: refresh_expires,
                 },
             )
-            _LOGGER.debug(
-                "SolarOfThings [%s]: access token refreshed; entry data updated",
-                entry.entry_id,
-            )
 
         hass.loop.call_soon_threadsafe(_update)
 
-    # Instantiate API in the appropriate auth mode
     if user_id and password:
         api = SolarOfThingsAPI(
             user_id=user_id,
@@ -113,11 +76,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             time_zone=time_zone,
             on_token_refreshed=_on_token_refreshed,
         )
-        # If the cached token is already expired (or absent), login immediately.
         if not api.access_token:
             await hass.async_add_executor_job(api.login)
     else:
-        # Legacy IOT-token mode
         api = SolarOfThingsAPI(
             iot_token=entry.data[CONF_IOT_TOKEN],
             time_zone=time_zone,
@@ -127,7 +88,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     station_id = entry.data[CONF_STATION_ID]
     configured_device_id = (entry.data.get(CONF_DEVICE_ID) or "").strip()
 
-    # ── Station coordinator (device list + monthly) ────────────────────────────
     station_coordinator = SolarOfThingsStationCoordinator(
         hass=hass,
         api=api,
@@ -136,7 +96,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     await station_coordinator.async_config_entry_first_refresh()
 
-    # ── Per-device coordinators ────────────────────────────────────────────────
     devices: list[dict[str, Any]] = (
         station_coordinator.data.get("devices", []) if station_coordinator.data else []
     )
@@ -148,12 +107,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ]
 
     device_coordinators: dict[str, SolarOfThingsDeviceCoordinator] = {}
-
     for dev in devices:
         device_id = str(dev.get("id") or "")
         if not device_id:
             continue
-        c = SolarOfThingsDeviceCoordinator(
+        coordinator = SolarOfThingsDeviceCoordinator(
             hass=hass,
             api=api,
             station_id=station_id,
@@ -161,8 +119,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             device_meta=dev,
             entry=entry,
         )
-        await c.async_config_entry_first_refresh()
-        device_coordinators[device_id] = c
+        await coordinator.async_config_entry_first_refresh()
+        device_coordinators[device_id] = coordinator
 
     hass.data[DOMAIN][entry.entry_id] = {
         "api": api,
@@ -174,35 +132,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Explicitly register the station hub device so that per-device entities
-    # can reference it via via_device without triggering the
-    # "non existing via_device" warning introduced in HA 2025.12.
-    dev_reg = dr.async_get(hass)
-    dev_reg.async_get_or_create(
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, station_id)},
         name=f"Solar Station {station_id}",
         manufacturer="Siseli",
         model="Station",
     )
-
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Coordinators
-# ──────────────────────────────────────────────────────────────────────────────
-
 class SolarOfThingsStationCoordinator(DataUpdateCoordinator):
-    """Fetch station-level data (device list + monthly stats)."""
-
     def __init__(
         self,
         hass: HomeAssistant,
@@ -230,10 +177,6 @@ class SolarOfThingsStationCoordinator(DataUpdateCoordinator):
             )
             return {"devices": devices, "monthly": monthly}
         except TokenExpiredError as err:
-            _LOGGER.error(
-                "SolarOfThings station %s: token expired — triggering re-auth: %s",
-                self.station_id, err,
-            )
             self._entry.async_start_reauth(self.hass)
             raise UpdateFailed(f"Token expired: {err}") from err
         except Exception as err:
@@ -241,8 +184,6 @@ class SolarOfThingsStationCoordinator(DataUpdateCoordinator):
 
 
 class SolarOfThingsDeviceCoordinator(DataUpdateCoordinator):
-    """Fetch device-level telemetry + settings."""
-
     def __init__(
         self,
         hass: HomeAssistant,
@@ -269,9 +210,21 @@ class SolarOfThingsDeviceCoordinator(DataUpdateCoordinator):
             time_series = await self.hass.async_add_executor_job(
                 fetch_latest_telemetry, self.api, self.device_id
             )
-            settings = await self.hass.async_add_executor_job(
-                self.api.fetch_settings, self.device_id
-            )
+
+            try:
+                settings = await self.hass.async_add_executor_job(
+                    self.api.fetch_settings, self.device_id
+                )
+            except TokenExpiredError:
+                raise
+            except Exception as err:
+                _LOGGER.warning(
+                    "SolarOfThings device %s: parameter read unavailable: %s",
+                    self.device_id,
+                    err,
+                )
+                settings = {}
+
             return {
                 "time_series": time_series,
                 "settings": settings,
@@ -280,10 +233,6 @@ class SolarOfThingsDeviceCoordinator(DataUpdateCoordinator):
                 "device_meta": self.device_meta,
             }
         except TokenExpiredError as err:
-            _LOGGER.error(
-                "SolarOfThings device %s: token expired — triggering re-auth: %s",
-                self.device_id, err,
-            )
             self._entry.async_start_reauth(self.hass)
             raise UpdateFailed(f"Token expired: {err}") from err
         except Exception as err:
