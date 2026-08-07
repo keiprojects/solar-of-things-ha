@@ -47,6 +47,7 @@ from .const import (
     CONF_ACCESS_TOKEN_EXPIRES,
     CONF_REFRESH_TOKEN_EXPIRES,
 )
+from .telemetry import fetch_latest_telemetry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api = SolarOfThingsAPI(
             user_id=user_id,
             password=password,
-            iot_token=entry.data.get(CONF_IOT_TOKEN),          # cached token (avoids login on every restart)
+            iot_token=entry.data.get(CONF_IOT_TOKEN),
             refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
             access_token_expires=entry.data.get(CONF_ACCESS_TOKEN_EXPIRES),
             refresh_token_expires=entry.data.get(CONF_REFRESH_TOKEN_EXPIRES),
@@ -266,7 +267,7 @@ class SolarOfThingsDeviceCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             time_series = await self.hass.async_add_executor_job(
-                self.api.fetch_latest_data, self.device_id
+                fetch_latest_telemetry, self.api, self.device_id
             )
             settings = await self.hass.async_add_executor_job(
                 self.api.fetch_settings, self.device_id
