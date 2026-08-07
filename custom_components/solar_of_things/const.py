@@ -53,7 +53,6 @@ TOKEN_REFRESH_LEAD_SECONDS = 300  # 5 minutes
 # ─── Sensor keys ───────────────────────────────────────────────────────────────
 SENSOR_KEYS = [
     "pvInputPower",
-    "acOutputActivePower",
     "batteryDischargeCurrent",
     "batteryChargingCurrent",
     "batteryVoltage",
@@ -61,7 +60,8 @@ SENSOR_KEYS = [
     "batteryPower",
     "batterySOC",
     "gridPower",
-    "loadPower",
+    "loadApparentPower",
+    "loadPercent",
 ]
 
 SENSOR_DEFINITIONS = {
@@ -70,12 +70,6 @@ SENSOR_DEFINITIONS = {
         "unit": "W",
         "device_class": "power",
         "icon": "mdi:solar-power",
-    },
-    "acOutputActivePower": {
-        "name": "AC Output Power",
-        "unit": "W",
-        "device_class": "power",
-        "icon": "mdi:power-plug",
     },
     "batteryDischargeCurrent": {
         "name": "Battery Discharge Current",
@@ -119,11 +113,16 @@ SENSOR_DEFINITIONS = {
         "device_class": "power",
         "icon": "mdi:transmission-tower-import",
     },
-    "loadPower": {
-        "name": "Load Power",
-        "unit": "W",
-        "device_class": "power",
+    "loadApparentPower": {
+        "name": "Load Apparent Power",
+        "unit": "VA",
+        "device_class": "apparent_power",
         "icon": "mdi:home-lightning-bolt",
+    },
+    "loadPercent": {
+        "name": "Load Percent",
+        "unit": "%",
+        "icon": "mdi:gauge",
     },
     # Monthly summary sensors
     "monthly_pv_generated": {
