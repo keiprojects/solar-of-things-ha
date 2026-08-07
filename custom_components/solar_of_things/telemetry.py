@@ -68,11 +68,17 @@ def _canonical_values(raw: dict[str, Any]) -> dict[str, Any]:
     if pv_kw is not None:
         canonical["pvInputPower"] = pv_kw * 1000.0
 
-    output_kw = _first_float(raw, "outputActivePower")
-    if output_kw is not None:
-        output_watts = output_kw * 1000.0
-        canonical["acOutputActivePower"] = output_watts
-        canonical["loadPower"] = output_watts
+    # On this inverter's live data, outputActivePower tracks solar generation
+    # rather than the household load despite its protocol label. Do not expose
+    # it as load watts. The reliable load-side values are apparent power (VA)
+    # and output load percentage.
+    output_va = _first_float(raw, "outputApparentPower")
+    if output_va is not None:
+        canonical["loadApparentPower"] = output_va
+
+    output_percent = _first_float(raw, "outputLoadPercent")
+    if output_percent is not None:
+        canonical["loadPercent"] = output_percent
 
     voltage = _first_float(raw, "batteryVoltage")
     charge = _first_float(raw, "batteryChargingCurrent", "bmsChargingCurrent")
