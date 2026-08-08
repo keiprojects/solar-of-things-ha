@@ -37,10 +37,10 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
 ]
 
-# The Siseli app refreshes live inverter data frequently. 20 seconds keeps the
-# HA dashboard responsive without polling as aggressively as the app's ~10 s
-# refresh cadence.
-DEVICE_UPDATE_INTERVAL = timedelta(seconds=20)
+# Live telemetry now uses the same lightweight current-state endpoint family as
+# the Solar of Things UI, so a 10-second refresh no longer requires repeatedly
+# downloading the full one-hour telemetry history.
+DEVICE_UPDATE_INTERVAL = timedelta(seconds=10)
 STATION_UPDATE_INTERVAL = timedelta(minutes=30)
 
 
