@@ -115,8 +115,8 @@ def _live_get(api: Any, path: str, params: dict[str, Any]) -> dict[str, Any]:
     """GET a Siseli live endpoint using the exact web-client request shape.
 
     The live state endpoint does not use IOT-Open-AppID request signing. The
-    official Solar of Things web client sends only the current IOT token and
-    time-zone headers for this request.
+    Solar of Things web client sends the current IOT token and time-zone headers
+    for this request.
     """
     api._ensure_token_valid()
 
@@ -135,8 +135,6 @@ def _live_get(api: Any, path: str, params: dict[str, Any]) -> dict[str, Any]:
     )
 
     if response.status_code == 401:
-        # Force the API client's existing refresh/re-login strategy, then retry
-        # once with the new token.
         api._access_expires = datetime.now(timezone.utc)
         api._ensure_token_valid()
         response = api.session.get(
@@ -160,12 +158,7 @@ def _live_get(api: Any, path: str, params: dict[str, Any]) -> dict[str, Any]:
 def _flatten_live_payload(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], str | None]:
-    """Flatten a live response and retain its cloud sample timestamp.
-
-    Energy-flow node values intentionally override duplicate values from the
-    full state object. The Solar of Things energy-flow UI can return fresher
-    node values than the larger cached state snapshot.
-    """
+    """Flatten a live response and retain its cloud sample timestamp."""
     raw: dict[str, Any] = {}
 
     state = payload.get("deviceAttributeState")
@@ -183,9 +176,6 @@ def _flatten_live_payload(
             if value is not None:
                 raw[key] = value
 
-    # Prefer the energy-flow node values over duplicate fields. This is
-    # important for the frequently changing PV/grid/battery/load values shown
-    # by the live Solar of Things energy-flow screen.
     for node_name in (
         "pvPanelFlow",
         "gridFlow",
@@ -220,11 +210,13 @@ def _flatten_live_payload(
 def _fetch_live_telemetry(
     api: Any, device_id: str
 ) -> tuple[dict[str, Any], str, str | None]:
-    """Fetch one current snapshot, preferring the energy-flow endpoint."""
+    """Fetch one current snapshot from the proven Solar of Things endpoint."""
     errors: list[str] = []
     params = {"deviceId": device_id, "dataSource": 1}
 
-    for path in (API_LIVE_ENERGY_FLOW, API_LIVE_STATE):
+    # state/latest/v1 is the exact request captured from the Solar of Things web
+    # client for this inverter, so try it first. Energy flow is only a fallback.
+    for path in (API_LIVE_STATE, API_LIVE_ENERGY_FLOW):
         try:
             payload = _live_get(api, path, params)
             raw, sample_time = _flatten_live_payload(payload)
