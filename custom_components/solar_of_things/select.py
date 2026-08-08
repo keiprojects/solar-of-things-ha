@@ -253,7 +253,7 @@ class SolarOfThingsChargerPrioritySelect(_BaseSelect):
     ) -> None:
         super().__init__(api, coordinator, station_id, device_id, device_name)
         self._attr_name = f"{device_name} Charger Priority"
-        self._attr_unique_id = f"{DOMAIN}_{station_id}_{device_id}_charger_priority"
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_{device_id}_battery_priority"
         self._attr_options = CHARGER_PRIORITIES
         self._attr_icon = "mdi:battery-sync"
 
