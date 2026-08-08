@@ -28,10 +28,11 @@ from .telemetry import fetch_latest_telemetry
 
 _LOGGER = logging.getLogger(__name__)
 
-# Expose telemetry plus only inverter controls whose write format and value
-# mapping have been verified against this inverter's Siseli Control UI.
+# Expose telemetry plus inverter controls whose Siseli write format and value
+# mapping/range have been verified for this inverter.
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
+    Platform.NUMBER,
     Platform.SELECT,
     Platform.SWITCH,
 ]
