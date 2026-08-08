@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .controls import write_setting
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ OUTPUT_MODE_BY_VALUE: dict[int, str] = {
     2: "Utility First (USO)",
 }
 OUTPUT_MODES = list(OUTPUT_MODE_BY_VALUE.values())
+OUTPUT_MODE_TO_VALUE: dict[str, int] = {v: k for k, v in OUTPUT_MODE_BY_VALUE.items()}
 
 # Confirmed against the Siseli portal control UI / live device readback.
 # Real API key: chargerPrioritySetting
@@ -33,6 +35,9 @@ CHARGER_PRIORITY_BY_VALUE: dict[int, str] = {
     2: "Solar Only (OSO)",
 }
 CHARGER_PRIORITIES = list(CHARGER_PRIORITY_BY_VALUE.values())
+CHARGER_PRIORITY_TO_VALUE: dict[str, int] = {
+    v: k for k, v in CHARGER_PRIORITY_BY_VALUE.items()
+}
 
 
 def _setting_value(settings: Any, key: str) -> Any:
@@ -145,8 +150,16 @@ class SolarOfThingsOperatingModeSelect(_BaseSelect):
             return None
 
     async def async_select_option(self, option: str) -> None:
+        value = OUTPUT_MODE_TO_VALUE.get(option)
+        if value is None:
+            raise ValueError(f"Unknown output source priority: {option!r}")
+
         await self.hass.async_add_executor_job(
-            self._api.set_operating_mode, self._device_id, option
+            write_setting,
+            self._api,
+            self._device_id,
+            "outputSourcePrioritySetting",
+            value,
         )
         await self.coordinator.async_request_refresh()
 
@@ -178,7 +191,15 @@ class SolarOfThingsBatteryPrioritySelect(_BaseSelect):
             return None
 
     async def async_select_option(self, option: str) -> None:
+        value = CHARGER_PRIORITY_TO_VALUE.get(option)
+        if value is None:
+            raise ValueError(f"Unknown charger priority: {option!r}")
+
         await self.hass.async_add_executor_job(
-            self._api.set_battery_priority, self._device_id, option
+            write_setting,
+            self._api,
+            self._device_id,
+            "chargerPrioritySetting",
+            value,
         )
         await self.coordinator.async_request_refresh()
