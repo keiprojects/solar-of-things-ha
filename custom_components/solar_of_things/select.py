@@ -15,13 +15,12 @@ from .controls import write_setting
 
 _LOGGER = logging.getLogger(__name__)
 
-# Confirmed against the Siseli portal control UI / live device readback.
+# Confirmed against this inverter's available output-source-priority modes.
 # Real API key: outputSourcePrioritySetting
-# 0 = SUB, 1 = SBU, 2 = USO
+# 0 = SUB, 1 = SBU
 OUTPUT_MODE_BY_VALUE: dict[int, str] = {
     0: "Solar First (SUB)",
     1: "Solar+Battery First (SBU)",
-    2: "Utility First (USO)",
 }
 OUTPUT_MODES = list(OUTPUT_MODE_BY_VALUE.values())
 OUTPUT_MODE_TO_VALUE: dict[str, int] = {v: k for k, v in OUTPUT_MODE_BY_VALUE.items()}
