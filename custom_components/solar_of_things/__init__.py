@@ -28,9 +28,10 @@ from .telemetry import fetch_latest_telemetry
 
 _LOGGER = logging.getLogger(__name__)
 
-# This inverter-specific fork is deliberately read-only. All telemetry and
-# readable parameter values are exposed as sensors; no commands are sent.
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+# Expose all read-only telemetry plus the two verified inverter controls:
+# Output Source Priority and Charger Source Priority.
+# Other number/switch controls remain disabled until their mappings are verified.
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SELECT]
 
 DEVICE_UPDATE_INTERVAL = timedelta(minutes=5)
 STATION_UPDATE_INTERVAL = timedelta(minutes=30)
