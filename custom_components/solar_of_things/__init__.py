@@ -28,10 +28,13 @@ from .telemetry import fetch_latest_telemetry
 
 _LOGGER = logging.getLogger(__name__)
 
-# Expose all read-only telemetry plus the two verified inverter controls:
-# Output Source Priority and Charger Source Priority.
-# Other number/switch controls remain disabled until their mappings are verified.
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SELECT]
+# Expose telemetry plus only inverter controls whose write format and value
+# mapping have been verified against this inverter's Siseli Control UI.
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.SELECT,
+    Platform.SWITCH,
+]
 
 DEVICE_UPDATE_INTERVAL = timedelta(minutes=5)
 STATION_UPDATE_INTERVAL = timedelta(minutes=30)
