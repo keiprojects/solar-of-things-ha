@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .api import _make_signed_headers
 from .const import (
     API_BASE_URL,
     API_LIVE_ENERGY_FLOW,
@@ -112,16 +111,21 @@ def _canonical_values(raw: dict[str, Any]) -> dict[str, Any]:
     return canonical
 
 
-def _signed_get(api: Any, path: str, params: dict[str, Any]) -> dict[str, Any]:
-    """GET a Siseli live endpoint using the portal's signed GET request shape."""
+def _live_get(api: Any, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    """GET a Siseli live endpoint using the exact web-client request shape.
+
+    The live state endpoint does not use IOT-Open-AppID request signing. The
+    official Solar of Things web client sends only the current IOT token and
+    time-zone headers for this request.
+    """
     api._ensure_token_valid()
 
     def _headers() -> dict[str, str]:
-        # The Siseli client hashes an empty JSON object for GET requests.
-        headers = _make_signed_headers(b"{}")
-        headers["IOT-Token"] = api.access_token
-        headers["IOT-Time-Zone"] = getattr(api, "_time_zone", "Asia/Manila")
-        return headers
+        return {
+            "Accept": "application/json",
+            "IOT-Token": api.access_token,
+            "IOT-Time-Zone": getattr(api, "_time_zone", "Asia/Manila"),
+        }
 
     response = api.session.get(
         f"{API_BASE_URL}{path}",
@@ -131,6 +135,8 @@ def _signed_get(api: Any, path: str, params: dict[str, Any]) -> dict[str, Any]:
     )
 
     if response.status_code == 401:
+        # Force the API client's existing refresh/re-login strategy, then retry
+        # once with the new token.
         api._access_expires = datetime.now(timezone.utc)
         api._ensure_token_valid()
         response = api.session.get(
@@ -220,7 +226,7 @@ def _fetch_live_telemetry(
 
     for path in (API_LIVE_ENERGY_FLOW, API_LIVE_STATE):
         try:
-            payload = _signed_get(api, path, params)
+            payload = _live_get(api, path, params)
             raw, sample_time = _flatten_live_payload(payload)
             if raw:
                 return raw, path, sample_time
