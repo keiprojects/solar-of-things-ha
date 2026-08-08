@@ -1,9 +1,9 @@
 """Inverter-specific telemetry collection and normalisation.
 
 This fork targets gather protocol version 493332949100363776 (protocol code
-44). The normal polling path uses Siseli's live snapshot endpoints—the same
-family of endpoints used by the Solar of Things UI—instead of repeatedly
-querying one hour of history. The history endpoint remains as a fallback.
+44). Normal polling uses Siseli's current-state endpoints instead of repeatedly
+querying one hour of history. The history endpoint remains as a compatibility
+fallback.
 """
 from __future__ import annotations
 
@@ -13,15 +13,19 @@ from pathlib import Path
 from typing import Any
 
 from .api import _make_signed_headers
-from .const import API_LIVE_ENERGY_FLOW, API_LIVE_STATE, API_TIME_SERIES
+from .const import (
+    API_BASE_URL,
+    API_LIVE_ENERGY_FLOW,
+    API_LIVE_STATE,
+    API_TIME_SERIES,
+)
 
 PROTOCOL_SCHEMA: dict[str, dict[str, Any]] = json.loads(
     Path(__file__).with_name("protocol_schema.json").read_text(encoding="utf-8")
 )
 TELEMETRY_KEYS: tuple[str, ...] = tuple(PROTOCOL_SCHEMA)
 
-# Used only when both live snapshot endpoints are unavailable. Keeping the
-# historical requests batched preserves complete-protocol compatibility.
+# Used only when both live snapshot endpoints are unavailable.
 TELEMETRY_BATCH_SIZE = 40
 
 
@@ -69,7 +73,7 @@ def _canonical_values(raw: dict[str, Any]) -> dict[str, Any]:
     if pv_kw is not None:
         canonical["pvInputPower"] = pv_kw * 1000.0
 
-    output_kw = _first_float(raw, "outputActivePower")
+    output_kw = _first_float(raw, "outputActivePower", "acOutputActivePower")
     if output_kw is not None:
         output_watts = output_kw * 1000.0
         canonical["acOutputActivePower"] = output_watts
@@ -113,29 +117,27 @@ def _signed_get(api: Any, path: str, params: dict[str, Any]) -> dict[str, Any]:
     api._ensure_token_valid()
 
     def _headers() -> dict[str, str]:
-        # The portal hashes an empty JSON object for GET requests.
+        # The Siseli client hashes an empty JSON object for GET requests.
         headers = _make_signed_headers(b"{}")
         headers["IOT-Token"] = api.access_token
         headers["IOT-Time-Zone"] = getattr(api, "_time_zone", "Asia/Manila")
         return headers
 
     response = api.session.get(
-        f"https://solar.siseli.com{path}",
+        f"{API_BASE_URL}{path}",
         params=params,
         headers=_headers(),
-        timeout=15,
+        timeout=8,
     )
 
     if response.status_code == 401:
-        # Force the API client's existing refresh/re-login strategy, then retry
-        # once with a newly signed request and the new token.
         api._access_expires = datetime.now(timezone.utc)
         api._ensure_token_valid()
         response = api.session.get(
-            f"https://solar.siseli.com{path}",
+            f"{API_BASE_URL}{path}",
             params=params,
             headers=_headers(),
-            timeout=15,
+            timeout=8,
         )
 
     response.raise_for_status()
@@ -149,13 +151,24 @@ def _signed_get(api: Any, path: str, params: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _flatten_live_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Flatten a Siseli live state/energy-flow response into raw key -> value."""
+def _flatten_live_payload(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    """Flatten a live response and retain its cloud sample timestamp.
+
+    Energy-flow node values intentionally override duplicate values from the
+    full state object. The Solar of Things energy-flow UI can return fresher
+    node values than the larger cached state snapshot.
+    """
     raw: dict[str, Any] = {}
 
     state = payload.get("deviceAttributeState")
     if not isinstance(state, dict):
         state = payload
+
+    sample_time = state.get("time") if isinstance(state, dict) else None
+    if sample_time is None:
+        sample_time = payload.get("time")
 
     fields = state.get("fields") if isinstance(state, dict) else None
     if isinstance(fields, dict):
@@ -164,9 +177,9 @@ def _flatten_live_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if value is not None:
                 raw[key] = value
 
-    # Energy-flow responses also expose the principal nodes separately. Merge
-    # them as a supplement in case a firmware omits one of those values from
-    # deviceAttributeState.fields.
+    # Prefer the energy-flow node values over duplicate fields. This is
+    # important for the frequently changing PV/grid/battery/load values shown
+    # by the live Solar of Things energy-flow screen.
     for node_name in (
         "pvPanelFlow",
         "gridFlow",
@@ -183,7 +196,7 @@ def _flatten_live_payload(payload: dict[str, Any]) -> dict[str, Any]:
         node_key = node.get("key")
         node_value = _latest_sample(node.get("value"))
         if node_key and node_value is not None:
-            raw.setdefault(str(node_key), node_value)
+            raw[str(node_key)] = node_value
 
         extras = node.get("extraValues")
         if isinstance(extras, list):
@@ -193,12 +206,14 @@ def _flatten_live_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 key = extra.get("key")
                 value = _latest_sample(extra)
                 if key and value is not None:
-                    raw.setdefault(str(key), value)
+                    raw[str(key)] = value
 
-    return raw
+    return raw, str(sample_time) if sample_time is not None else None
 
 
-def _fetch_live_telemetry(api: Any, device_id: str) -> tuple[dict[str, Any], str]:
+def _fetch_live_telemetry(
+    api: Any, device_id: str
+) -> tuple[dict[str, Any], str, str | None]:
     """Fetch one current snapshot, preferring the energy-flow endpoint."""
     errors: list[str] = []
     params = {"deviceId": device_id, "dataSource": 1}
@@ -206,9 +221,9 @@ def _fetch_live_telemetry(api: Any, device_id: str) -> tuple[dict[str, Any], str
     for path in (API_LIVE_ENERGY_FLOW, API_LIVE_STATE):
         try:
             payload = _signed_get(api, path, params)
-            raw = _flatten_live_payload(payload)
+            raw, sample_time = _flatten_live_payload(payload)
             if raw:
-                return raw, path
+                return raw, path, sample_time
             errors.append(f"{path}: empty fields")
         except Exception as err:
             errors.append(f"{path}: {err}")
@@ -261,14 +276,18 @@ def _fetch_history_fallback(api: Any, device_id: str) -> dict[str, Any]:
 
 
 def fetch_latest_telemetry(api: Any, device_id: str) -> dict[str, Any]:
-    """Fetch the current inverter snapshot with automatic history fallback."""
+    """Fetch current inverter telemetry with automatic history fallback."""
+    polled_at = datetime.now(timezone.utc).isoformat()
+
     try:
-        raw, source = _fetch_live_telemetry(api, device_id)
+        raw, source, sample_time = _fetch_live_telemetry(api, device_id)
         return {
             "raw": raw,
             "canonical": _canonical_values(raw),
             "source": "live",
             "live_endpoint": source,
+            "cloud_sample_time": sample_time,
+            "polled_at": polled_at,
         }
     except Exception as live_error:
         raw = _fetch_history_fallback(api, device_id)
@@ -277,4 +296,6 @@ def fetch_latest_telemetry(api: Any, device_id: str) -> dict[str, Any]:
             "canonical": _canonical_values(raw),
             "source": "history_fallback",
             "live_error": str(live_error),
+            "cloud_sample_time": None,
+            "polled_at": polled_at,
         }
