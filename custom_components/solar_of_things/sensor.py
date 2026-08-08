@@ -109,6 +109,21 @@ def _apply_measurement_metadata(entity: SensorEntity, unit: str, key: str) -> No
         entity._attr_state_class = SensorStateClass.MEASUREMENT
 
 
+def _telemetry_attributes(coordinator) -> dict[str, Any]:
+    """Expose polling diagnostics without creating high-churn debug entities."""
+    time_series = (coordinator.data or {}).get("time_series") or {}
+    attributes: dict[str, Any] = {
+        "telemetry_source": time_series.get("source"),
+        "polled_at": time_series.get("polled_at"),
+        "cloud_sample_time": time_series.get("cloud_sample_time"),
+    }
+    if time_series.get("live_endpoint"):
+        attributes["live_endpoint"] = time_series.get("live_endpoint")
+    if time_series.get("live_error"):
+        attributes["live_error"] = time_series.get("live_error")
+    return attributes
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -226,6 +241,10 @@ class SolarOfThingsCanonicalSensor(_DeviceSensor):
         canonical = time_series.get("canonical") or {}
         return _number(canonical.get(self._sensor_key))
 
+    @property
+    def extra_state_attributes(self):
+        return _telemetry_attributes(self.coordinator)
+
 
 class SolarOfThingsProtocolSensor(_DeviceSensor):
     def __init__(
@@ -267,6 +286,7 @@ class SolarOfThingsProtocolSensor(_DeviceSensor):
         attributes = {
             "api_key": self._sensor_key,
             "protocol_group": self._metadata.get("group"),
+            **_telemetry_attributes(self.coordinator),
         }
         enum_map = self._metadata.get("enum") or {}
         if enum_map:
