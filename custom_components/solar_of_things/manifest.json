@@ -1,15 +1,21 @@
 {
   "domain": "solar_of_things",
   "name": "Solar of Things",
-  "codeowners": ["@keiprojects"],
+  "codeowners": [
+    "@keiprojects"
+  ],
   "config_flow": true,
+  "dependencies": [
+    "bluetooth",
+    "bluetooth_adapters"
+  ],
   "documentation": "https://github.com/keiprojects/solar-of-things-ha",
-  "homeassistant": "2023.6.0",
+  "homeassistant": "2026.6.0",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/keiprojects/solar-of-things-ha/issues",
   "requirements": [
     "pycryptodome>=3.9.0"
   ],
-  "version": "2.5.8"
+  "version": "2.6.0"
 }
