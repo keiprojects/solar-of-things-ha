@@ -94,7 +94,7 @@ def _canonical_values(raw: dict[str, Any]) -> dict[str, Any]:
 
     if voltage is not None and (charge is not None or discharge is not None):
         canonical["batteryPower"] = (
-            (discharge or 0.0) - (charge or 0.0)
+            (charge or 0.0) - (discharge or 0.0)
         ) * voltage
 
     mains_kw = _first_float(raw, "mainsPower")
