@@ -6,9 +6,9 @@ Supports two setup modes:
   2. IOT Token (legacy / advanced) – user pastes the token from DevTools.
      A re-auth flow is triggered when the token expires.
 
-Re-auth flow:  HA calls async_step_reauth when a TokenExpiredError is caught by
-the coordinator.  The user is asked only for the field(s) that need updating
-(usually just a fresh token, or new credentials).
+The options flow also allows an optional local BLE collector address. When set,
+live inverter telemetry is read locally over Bluetooth while cloud access stays
+available for station summaries, settings and fallback.
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from .const import (
     CONF_STATION_ID,
     CONF_DEVICE_ID,
     CONF_TIME_ZONE,
+    CONF_BLE_ADDRESS,
     CONF_REFRESH_TOKEN,
     CONF_ACCESS_TOKEN_EXPIRES,
     CONF_REFRESH_TOKEN_EXPIRES,
@@ -39,7 +40,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# ─── Validation helpers ────────────────────────────────────────────────────────
 
 async def _validate_password_auth(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Validate user-ID/password auth, return title."""
@@ -55,7 +55,6 @@ async def _validate_password_auth(hass: HomeAssistant, data: dict[str, Any]) -> 
     except Exception as err:
         raise CannotConnect(str(err)) from err
 
-    # After login, validate station
     ok = await hass.async_add_executor_job(api.test_connection, data[CONF_STATION_ID])
     if not ok:
         raise CannotConnect("Station/device unreachable after login.")
@@ -94,17 +93,19 @@ async def _validate_token_auth(hass: HomeAssistant, data: dict[str, Any]) -> dic
     return {"title": f"Solar Station {station_id}"}
 
 
-# ─── Config Flow ───────────────────────────────────────────────────────────────
-
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Solar of Things."""
 
-    VERSION = 3  # bumped for new auth fields
+    VERSION = 3
 
     def __init__(self) -> None:
-        self._auth_mode: str = "password"  # "password" | "token"
+        self._auth_mode: str = "password"
 
-    # ── Step 1: choose auth mode ───────────────────────────────────────────────
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry):
+        """Return the options flow handler."""
+        return SolarOfThingsOptionsFlow()
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Offer choice of auth mode."""
@@ -127,8 +128,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "docs_url": "https://github.com/conexocasa/solar-of-things-ha"
             },
         )
-
-    # ── Step 2a: user-id + password ────────────────────────────────────────────
 
     async def async_step_password(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """User-ID + password setup step."""
@@ -177,8 +176,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    # ── Step 2b: legacy IOT token ─────────────────────────────────────────────
-
     async def async_step_token(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Legacy IOT-token setup step."""
         errors: dict[str, str] = {}
@@ -212,10 +209,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    # ── Re-auth flow ───────────────────────────────────────────────────────────
-
     async def async_step_reauth(self, entry_data: dict[str, Any] | None = None) -> FlowResult:
-        """Triggered by the coordinator when TokenExpiredError is raised."""
+        """Triggered by the coordinator when a TokenExpiredError is caught."""
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -234,7 +229,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             if has_password:
-                # Re-authenticate with potentially updated email/password
                 merged = {**(existing_entry.data if existing_entry else {}), **user_input}
                 try:
                     info = await _validate_password_auth(self.hass, merged)
@@ -260,7 +254,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     await self.hass.config_entries.async_reload(existing_entry.entry_id)
                     return self.async_abort(reason="reauth_successful")
             else:
-                # Legacy token mode: user provides a fresh token
                 merged = {**(existing_entry.data if existing_entry else {}), **user_input}
                 try:
                     await _validate_token_auth(self.hass, merged)
@@ -277,7 +270,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     await self.hass.config_entries.async_reload(existing_entry.entry_id)
                     return self.async_abort(reason="reauth_successful")
 
-        # Build schema based on whether the entry has stored credentials
         if has_password:
             schema = vol.Schema(
                 {
@@ -297,7 +289,34 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
 
-# ─── Custom exceptions ─────────────────────────────────────────────────────────
+class SolarOfThingsOptionsFlow(config_entries.OptionsFlowWithReload):
+    """Configure optional local BLE telemetry."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        if user_input is not None:
+            address = (user_input.get(CONF_BLE_ADDRESS) or "").strip()
+            return self.async_create_entry(
+                title="",
+                data={**self.config_entry.options, CONF_BLE_ADDRESS: address},
+            )
+
+        current = (
+            self.config_entry.options.get(CONF_BLE_ADDRESS)
+            or self.config_entry.data.get(CONF_BLE_ADDRESS)
+            or ""
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_BLE_ADDRESS,
+                        description={"suggested_value": current},
+                    ): cv.string,
+                }
+            ),
+        )
+
 
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect."""
