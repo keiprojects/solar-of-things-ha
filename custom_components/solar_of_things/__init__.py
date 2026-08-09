@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -12,6 +12,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import SolarOfThingsAPI, TokenExpiredError
+from .ble import SolarOfThingsBleClient
 from .const import (
     DOMAIN,
     CONF_USER_ID,
@@ -20,6 +21,7 @@ from .const import (
     CONF_STATION_ID,
     CONF_DEVICE_ID,
     CONF_TIME_ZONE,
+    CONF_BLE_ADDRESS,
     CONF_REFRESH_TOKEN,
     CONF_ACCESS_TOKEN_EXPIRES,
     CONF_REFRESH_TOKEN_EXPIRES,
@@ -28,8 +30,6 @@ from .telemetry import fetch_latest_telemetry
 
 _LOGGER = logging.getLogger(__name__)
 
-# Expose telemetry plus inverter controls whose Siseli write format and value
-# mapping/range have been verified for this inverter.
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.NUMBER,
@@ -37,11 +37,10 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
 ]
 
-# Live telemetry now uses the same lightweight current-state endpoint family as
-# the Solar of Things UI, so a 10-second refresh no longer requires repeatedly
-# downloading the full one-hour telemetry history.
 DEVICE_UPDATE_INTERVAL = timedelta(seconds=10)
+BLE_DEVICE_UPDATE_INTERVAL = timedelta(seconds=5)
 STATION_UPDATE_INTERVAL = timedelta(minutes=30)
+BLE_SETTINGS_UPDATE_INTERVAL = timedelta(minutes=5)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -95,6 +94,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     station_id = entry.data[CONF_STATION_ID]
     configured_device_id = (entry.data.get(CONF_DEVICE_ID) or "").strip()
+    ble_address = (
+        entry.options.get(CONF_BLE_ADDRESS)
+        or entry.data.get(CONF_BLE_ADDRESS)
+        or ""
+    ).strip()
 
     station_coordinator = SolarOfThingsStationCoordinator(
         hass=hass,
@@ -114,6 +118,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             {"id": configured_device_id, "name": configured_device_id}
         ]
 
+    ble_client: SolarOfThingsBleClient | None = None
+    ble_target_device_id: str | None = None
+    if ble_address:
+        ble_client = SolarOfThingsBleClient(hass, ble_address)
+        if configured_device_id:
+            ble_target_device_id = configured_device_id
+        elif devices:
+            ble_target_device_id = str(devices[0].get("id") or "") or None
+        if len(devices) > 1 and not configured_device_id:
+            _LOGGER.warning(
+                "SolarOfThings: BLE address %s will be attached to the first inverter %s. "
+                "Set Device ID in the integration if this is not the intended inverter.",
+                ble_address,
+                ble_target_device_id,
+            )
+
     device_coordinators: dict[str, SolarOfThingsDeviceCoordinator] = {}
     for dev in devices:
         device_id = str(dev.get("id") or "")
@@ -126,6 +146,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             device=device_id,
             device_meta=dev,
             entry=entry,
+            ble_client=ble_client if device_id == ble_target_device_id else None,
         )
         await coordinator.async_config_entry_first_refresh()
         device_coordinators[device_id] = coordinator
@@ -136,6 +157,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "station_coordinator": station_coordinator,
         "device_coordinators": device_coordinators,
         "devices": devices,
+        "ble_client": ble_client,
+        "ble_target_device_id": ble_target_device_id,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -152,7 +175,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        ble_client = runtime.get("ble_client")
+        if ble_client:
+            try:
+                await ble_client.async_disconnect()
+            except Exception as err:
+                _LOGGER.debug("BLE disconnect failed during unload: %s", err)
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
 
@@ -200,38 +231,88 @@ class SolarOfThingsDeviceCoordinator(DataUpdateCoordinator):
         device: str,
         device_meta: dict[str, Any],
         entry: ConfigEntry,
+        ble_client: SolarOfThingsBleClient | None = None,
     ) -> None:
         self.api = api
         self.station_id = station_id
         self.device_id = device
         self.device_meta = device_meta
         self._entry = entry
+        self.ble_client = ble_client
+        self._settings_cache: dict[str, Any] = {}
+        self._settings_last_refresh: datetime | None = None
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_device_{device}",
-            update_interval=DEVICE_UPDATE_INTERVAL,
+            update_interval=(
+                BLE_DEVICE_UPDATE_INTERVAL if ble_client else DEVICE_UPDATE_INTERVAL
+            ),
         )
 
-    async def _async_update_data(self) -> dict[str, Any]:
-        try:
-            time_series = await self.hass.async_add_executor_job(
-                fetch_latest_telemetry, self.api, self.device_id
-            )
-
+    async def _async_fetch_time_series(self) -> dict[str, Any]:
+        """Prefer local BLE and fall back to the existing cloud telemetry path."""
+        if self.ble_client is not None:
             try:
-                settings = await self.hass.async_add_executor_job(
-                    self.api.fetch_settings, self.device_id
-                )
-            except TokenExpiredError:
-                raise
+                return await self.ble_client.async_fetch_telemetry()
             except Exception as err:
                 _LOGGER.warning(
-                    "SolarOfThings device %s: parameter read unavailable: %s",
+                    "SolarOfThings device %s: local BLE telemetry failed (%s); "
+                    "falling back to cloud",
                     self.device_id,
                     err,
                 )
-                settings = {}
+                cloud = await self.hass.async_add_executor_job(
+                    fetch_latest_telemetry, self.api, self.device_id
+                )
+                cloud["ble_error"] = str(err)
+                cloud["ble_address"] = self.ble_client.address
+                return cloud
+
+        return await self.hass.async_add_executor_job(
+            fetch_latest_telemetry, self.api, self.device_id
+        )
+
+    async def _async_fetch_settings(self) -> dict[str, Any]:
+        """Keep cloud settings available without slowing the 5-second BLE loop."""
+        now = datetime.now(timezone.utc)
+        if (
+            self.ble_client is not None
+            and self._settings_last_refresh is not None
+            and now - self._settings_last_refresh < BLE_SETTINGS_UPDATE_INTERVAL
+        ):
+            return self._settings_cache
+
+        try:
+            settings = await self.hass.async_add_executor_job(
+                self.api.fetch_settings, self.device_id
+            )
+        except TokenExpiredError:
+            if self.ble_client is None:
+                raise
+            _LOGGER.warning(
+                "SolarOfThings device %s: cloud token expired while BLE telemetry "
+                "is active; keeping cached settings",
+                self.device_id,
+            )
+            return self._settings_cache
+        except Exception as err:
+            _LOGGER.warning(
+                "SolarOfThings device %s: parameter read unavailable: %s",
+                self.device_id,
+                err,
+            )
+            return self._settings_cache
+
+        if isinstance(settings, dict):
+            self._settings_cache = settings
+        self._settings_last_refresh = now
+        return self._settings_cache
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        try:
+            time_series = await self._async_fetch_time_series()
+            settings = await self._async_fetch_settings()
 
             return {
                 "time_series": time_series,
