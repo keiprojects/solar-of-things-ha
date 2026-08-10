@@ -110,28 +110,17 @@ def _apply_measurement_metadata(entity: SensorEntity, unit: str, key: str) -> No
 
 
 def _telemetry_attributes(coordinator) -> dict[str, Any]:
-    """Expose polling and BLE diagnostics without separate debug entities."""
+    """Expose polling diagnostics without creating high-churn debug entities."""
     time_series = (coordinator.data or {}).get("time_series") or {}
     attributes: dict[str, Any] = {
         "telemetry_source": time_series.get("source"),
         "polled_at": time_series.get("polled_at"),
         "cloud_sample_time": time_series.get("cloud_sample_time"),
     }
-
-    for key in (
-        "ble_address",
-        "ble_transport",
-        "ble_protocol",
-        "ble_commands_ok",
-        "ble_command_errors",
-        "ble_error",
-        "live_endpoint",
-        "live_error",
-    ):
-        value = time_series.get(key)
-        if value not in (None, ""):
-            attributes[key] = value
-
+    if time_series.get("live_endpoint"):
+        attributes["live_endpoint"] = time_series.get("live_endpoint")
+    if time_series.get("live_error"):
+        attributes["live_error"] = time_series.get("live_error")
     return attributes
 
 
@@ -267,14 +256,30 @@ class SolarOfThingsProtocolSensor(_DeviceSensor):
         sensor_key: str,
         metadata: dict[str, Any],
     ) -> None:
-        super().__init__(coordinator, station_id, device_id, device_name)
+        super().__init__(coordinator)
+        self._station_id = station_id
+        self._device_id = device_id
+        self._device_name = device_name
         self._sensor_key = sensor_key
         self._metadata = metadata
+        self._attr_has_entity_name = True
         self._attr_name = metadata.get("name") or sensor_key
         self._attr_unique_id = f"{DOMAIN}_{station_id}_{device_id}_protocol_{sensor_key}"
 
         if metadata.get("type") == "Numeric":
             _apply_measurement_metadata(self, metadata.get("unit") or "", sensor_key)
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._device_id)},
+            "name": self._device_name,
+            "manufacturer": "Siseli",
+            "model": (self.coordinator.data.get("device_meta") or {}).get("model")
+            if self.coordinator.data
+            else None,
+            "via_device": (DOMAIN, self._station_id),
+        }
 
     @property
     def native_value(self):
