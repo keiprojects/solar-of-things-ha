@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from math import isclose
 from typing import Any
 
@@ -15,6 +16,11 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .controls import write_setting
 
+_LOGGER = logging.getLogger(__name__)
+
+# Wait this long after the most recent +/- click before writing to the inverter.
+WRITE_DEBOUNCE_SECONDS = 20
+
 
 @dataclass(frozen=True)
 class NumericControlDescription:
@@ -27,36 +33,14 @@ class NumericControlDescription:
     maximum: float
     step: float
     unit: str
-    allowed_values: tuple[float, ...] | None = None
 
 
-# POW-HVM6.2KP manual-backed numeric settings.
+# Numeric-control step policy:
+# - Default Home Assistant increment is 1.
+# - Settings whose inverter/manual precision is 0.1 keep a 0.1 increment.
 #
-# Program 02: 10A..120A, 10A steps
-# Program 11: 2A, then 10A..100A in 10A increments
-# Program 12: 44V..51V, 1V steps
-# Program 13: 48V..58V, 1V steps
-# Program 24: 40V..54V (the LCD uses 0.1V precision)
-# Program 26: 48V..60V, 0.1V steps
-# Program 27: 48V..54V, 0.1V steps
-# Program 29: 40V..52V, 0.1V steps
-# Program 31: 48V..60V, 0.1V steps
-# Program 33/34: 5..900 min, 5 min steps
-# Program 35: 0..90 days, 1 day steps
-MAX_MAINS_CHARGE_VALUES: tuple[float, ...] = (
-    2,
-    10,
-    20,
-    30,
-    40,
-    50,
-    60,
-    70,
-    80,
-    90,
-    100,
-)
-
+# The API write is debounced separately below, so repeated +/- clicks only send
+# the final value after the user has stopped changing it for 20 seconds.
 NUMERIC_CONTROLS: tuple[NumericControlDescription, ...] = (
     NumericControlDescription(
         "maximumChargingCurrentSetting",
@@ -64,7 +48,7 @@ NUMERIC_CONTROLS: tuple[NumericControlDescription, ...] = (
         "mdi:current-dc",
         10,
         120,
-        10,
+        1,
         "A",
     ),
     NumericControlDescription(
@@ -75,7 +59,6 @@ NUMERIC_CONTROLS: tuple[NumericControlDescription, ...] = (
         100,
         1,
         "A",
-        MAX_MAINS_CHARGE_VALUES,
     ),
     NumericControlDescription(
         "batteryRechargeVoltageSetting",
@@ -146,7 +129,7 @@ NUMERIC_CONTROLS: tuple[NumericControlDescription, ...] = (
         "mdi:timer-outline",
         5,
         900,
-        5,
+        1,
         "min",
     ),
     NumericControlDescription(
@@ -155,7 +138,7 @@ NUMERIC_CONTROLS: tuple[NumericControlDescription, ...] = (
         "mdi:timer-alert-outline",
         5,
         900,
-        5,
+        1,
         "min",
     ),
     NumericControlDescription(
@@ -285,7 +268,7 @@ async def async_setup_entry(
 
 
 class SolarOfThingsNumericSettingNumber(CoordinatorEntity, NumberEntity):
-    """A verified writable numeric Siseli inverter setting."""
+    """A writable numeric Siseli inverter setting with delayed write-through."""
 
     def __init__(
         self,
@@ -302,6 +285,8 @@ class SolarOfThingsNumericSettingNumber(CoordinatorEntity, NumberEntity):
         self._device_id = device_id
         self._device_name = device_name
         self._description = description
+        self._pending_value: int | float | None = None
+        self._write_handle = None
 
         self._attr_name = f"{device_name} {description.name}"
         self._attr_unique_id = (
@@ -326,6 +311,11 @@ class SolarOfThingsNumericSettingNumber(CoordinatorEntity, NumberEntity):
 
     @property
     def native_value(self) -> float | None:
+        # While the user is clicking +/- keep the pending value visible instead
+        # of snapping the card back to the last cloud-confirmed inverter value.
+        if self._pending_value is not None:
+            return self._pending_value
+
         settings = (self.coordinator.data or {}).get("settings") or {}
         value = _setting_value(settings, self._description.key)
         if value is None:
@@ -333,6 +323,45 @@ class SolarOfThingsNumericSettingNumber(CoordinatorEntity, NumberEntity):
 
         precision = _decimal_places(self._description.step)
         return round(value, precision)
+
+    def _schedule_pending_write(self) -> None:
+        """Start the write task after the 20-second quiet period expires."""
+        self._write_handle = None
+        self.hass.async_create_task(self._async_commit_pending_value())
+
+    async def _async_commit_pending_value(self) -> None:
+        """Write the final pending value once the user has stopped clicking."""
+        outgoing = self._pending_value
+        if outgoing is None:
+            return
+
+        try:
+            await self.hass.async_add_executor_job(
+                write_setting,
+                self._api,
+                self._device_id,
+                self._description.key,
+                outgoing,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Failed delayed inverter write for %s=%s",
+                self._description.key,
+                outgoing,
+            )
+            if self._pending_value == outgoing:
+                self._pending_value = None
+                self.async_write_ha_state()
+            return
+
+        # A newer click may already have queued another value while this write
+        # was in progress. Only clear the pending state if this was still the
+        # latest requested value.
+        if self._pending_value == outgoing:
+            self._pending_value = None
+
+        await self.coordinator.async_request_refresh()
+        self.async_write_ha_state()
 
     async def async_set_native_value(self, value: float) -> None:
         requested = float(value)
@@ -346,16 +375,6 @@ class SolarOfThingsNumericSettingNumber(CoordinatorEntity, NumberEntity):
                 f"{minimum:g} and {maximum:g} {self._description.unit}"
             )
 
-        allowed_values = self._description.allowed_values
-        if allowed_values is not None and not any(
-            isclose(requested, allowed, abs_tol=1e-7) for allowed in allowed_values
-        ):
-            allowed_text = ", ".join(f"{item:g}" for item in allowed_values)
-            raise ValueError(
-                f"{self._description.name} must be one of: "
-                f"{allowed_text} {self._description.unit}"
-            )
-
         steps = (requested - minimum) / step
         if not isclose(steps, round(steps), abs_tol=1e-7):
             raise ValueError(
@@ -364,15 +383,25 @@ class SolarOfThingsNumericSettingNumber(CoordinatorEntity, NumberEntity):
             )
 
         precision = _decimal_places(step)
-        outgoing: int | float
         rounded = round(requested, precision)
-        outgoing = int(rounded) if precision == 0 else rounded
+        outgoing: int | float = int(rounded) if precision == 0 else rounded
 
-        await self.hass.async_add_executor_job(
-            write_setting,
-            self._api,
-            self._device_id,
-            self._description.key,
-            outgoing,
+        # Update the displayed value immediately but do not write to the
+        # inverter yet. Every new click resets the quiet-period timer.
+        self._pending_value = outgoing
+        self.async_write_ha_state()
+
+        if self._write_handle is not None:
+            self._write_handle.cancel()
+
+        self._write_handle = self.hass.loop.call_later(
+            WRITE_DEBOUNCE_SECONDS,
+            self._schedule_pending_write,
         )
-        await self.coordinator.async_request_refresh()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Cancel an unsent delayed write if the entity is unloaded."""
+        if self._write_handle is not None:
+            self._write_handle.cancel()
+            self._write_handle = None
+        await super().async_will_remove_from_hass()
