@@ -6,9 +6,9 @@ Supports two setup modes:
   2. IOT Token (legacy / advanced) – user pastes the token from DevTools.
      A re-auth flow is triggered when the token expires.
 
-The options flow also allows an optional local BLE collector address. When set,
-live inverter telemetry is read locally over Bluetooth while cloud access stays
-available for station summaries, settings and fallback.
+Re-auth flow:  HA calls async_step_reauth when a TokenExpiredError is caught by
+the coordinator.  The user is asked only for the field(s) that need updating
+(usually just a fresh token, or new credentials).
 """
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
-from .api import SolarOfThingsAPI, AuthenticationError, TokenExpiredError
+from .api import SolarOfThingsAPI, AuthenticationError
 from .const import (
     DOMAIN,
     CONF_USER_ID,
@@ -32,7 +32,6 @@ from .const import (
     CONF_STATION_ID,
     CONF_DEVICE_ID,
     CONF_TIME_ZONE,
-    CONF_BLE_ADDRESS,
     CONF_REFRESH_TOKEN,
     CONF_ACCESS_TOKEN_EXPIRES,
     CONF_REFRESH_TOKEN_EXPIRES,
@@ -100,12 +99,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._auth_mode: str = "password"
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: config_entries.ConfigEntry):
-        """Return the options flow handler."""
-        return SolarOfThingsOptionsFlow()
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Offer choice of auth mode."""
@@ -210,7 +203,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_reauth(self, entry_data: dict[str, Any] | None = None) -> FlowResult:
-        """Triggered by the coordinator when a TokenExpiredError is caught."""
+        """Triggered by the coordinator when a TokenExpiredError is raised."""
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -286,35 +279,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=schema,
             errors=errors,
-        )
-
-
-class SolarOfThingsOptionsFlow(config_entries.OptionsFlowWithReload):
-    """Configure optional local BLE telemetry."""
-
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        if user_input is not None:
-            address = (user_input.get(CONF_BLE_ADDRESS) or "").strip()
-            return self.async_create_entry(
-                title="",
-                data={**self.config_entry.options, CONF_BLE_ADDRESS: address},
-            )
-
-        current = (
-            self.config_entry.options.get(CONF_BLE_ADDRESS)
-            or self.config_entry.data.get(CONF_BLE_ADDRESS)
-            or ""
-        )
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_BLE_ADDRESS,
-                        description={"suggested_value": current},
-                    ): cv.string,
-                }
-            ),
         )
 
 
