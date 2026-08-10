@@ -7,7 +7,6 @@ CONF_IOT_TOKEN = "iot_token"          # legacy / advanced manual entry
 CONF_STATION_ID = "station_id"
 CONF_DEVICE_ID = "device_id"
 CONF_TIME_ZONE = "time_zone"
-CONF_BLE_ADDRESS = "ble_address"
 
 # Credential-based auth (preferred)
 CONF_USER_ID = "user_id"       # Siseli account / user-ID login (not email)
