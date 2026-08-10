@@ -39,9 +39,7 @@ IMPORTANT_CANONICAL_SENSOR_KEYS: tuple[str, ...] = (
     "batteryDischargeCurrent",
 )
 
-# Raw protocol fields worth exposing in addition to the canonical sensors.
-# Together with IMPORTANT_CANONICAL_SENSOR_KEYS this produces the approved
-# 20-sensor inverter telemetry set.
+# Essential raw measurements in addition to the canonical dashboard sensors.
 IMPORTANT_PROTOCOL_SENSOR_KEYS: tuple[str, ...] = (
     "pvVoltage",
     "pvCurrent",
@@ -55,6 +53,33 @@ IMPORTANT_PROTOCOL_SENSOR_KEYS: tuple[str, ...] = (
     "tqfYearlyElectricityGeneration",
     "pvGeneratedEnergyOfTotal",
     "statusCode",
+)
+
+# Compact System Statuses set. These retain the operational/alarm information
+# that is useful for monitoring without bringing back the full raw protocol
+# schema and its hundreds of rarely-used entities.
+SYSTEM_STATUS_SENSOR_KEYS: tuple[str, ...] = (
+    "batteryStatus",
+    "solarChargingSwitch",
+    "acChargingSwitch",
+    "chargingMainSwitch",
+    "gridConnectionSign",
+    "doesTheMachineHaveAnOutput",
+    "fan1Status",
+    "fan2Status",
+    "lowBatteryAlarm",
+    "batteryNotConnected",
+    "abnormalFanSpeed",
+    "abnormalTemperatureSensor",
+    "inputVoltageTooHigh",
+    "bmsCommunicationNormal",
+    "bmsLowBatteryAlarmFlag",
+    "bmsLowPowerFaultFlag",
+)
+
+EXPOSED_PROTOCOL_SENSOR_KEYS: tuple[str, ...] = (
+    *IMPORTANT_PROTOCOL_SENSOR_KEYS,
+    *SYSTEM_STATUS_SENSOR_KEYS,
 )
 
 # These canonical measurements already represent their corresponding raw keys,
@@ -168,7 +193,7 @@ def _remove_obsolete_telemetry_entities(
     registry = er.async_get(hass)
     entries = er.async_entries_for_config_entry(registry, entry.entry_id)
 
-    allowed_protocol = set(IMPORTANT_PROTOCOL_SENSOR_KEYS)
+    allowed_protocol = set(EXPOSED_PROTOCOL_SENSOR_KEYS)
     obsolete_canonical = {"acOutputActivePower", "feedInPower"}
     obsolete_station_monthly = {
         "monthly_pv_generated",
@@ -238,7 +263,7 @@ async def async_setup_entry(
                 )
             )
 
-        for key in IMPORTANT_PROTOCOL_SENSOR_KEYS:
+        for key in EXPOSED_PROTOCOL_SENSOR_KEYS:
             if key in _CANONICAL_RAW_KEYS:
                 continue
             metadata = PROTOCOL_SCHEMA.get(key)
