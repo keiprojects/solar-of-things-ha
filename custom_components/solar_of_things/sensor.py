@@ -110,17 +110,28 @@ def _apply_measurement_metadata(entity: SensorEntity, unit: str, key: str) -> No
 
 
 def _telemetry_attributes(coordinator) -> dict[str, Any]:
-    """Expose polling diagnostics without creating high-churn debug entities."""
+    """Expose polling and BLE diagnostics without separate debug entities."""
     time_series = (coordinator.data or {}).get("time_series") or {}
     attributes: dict[str, Any] = {
         "telemetry_source": time_series.get("source"),
         "polled_at": time_series.get("polled_at"),
         "cloud_sample_time": time_series.get("cloud_sample_time"),
     }
-    if time_series.get("live_endpoint"):
-        attributes["live_endpoint"] = time_series.get("live_endpoint")
-    if time_series.get("live_error"):
-        attributes["live_error"] = time_series.get("live_error")
+
+    for key in (
+        "ble_address",
+        "ble_transport",
+        "ble_protocol",
+        "ble_commands_ok",
+        "ble_command_errors",
+        "ble_error",
+        "live_endpoint",
+        "live_error",
+    ):
+        value = time_series.get(key)
+        if value not in (None, ""):
+            attributes[key] = value
+
     return attributes
 
 
