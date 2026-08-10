@@ -8,6 +8,7 @@ from typing import Any
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -26,11 +27,13 @@ class NumericControlDescription:
     maximum: float
     step: float
     unit: str
+    allowed_values: tuple[float, ...] | None = None
 
 
-# POW-HVM6.2KP manual-backed settings.
+# POW-HVM6.2KP manual-backed numeric settings.
 #
 # Program 02: 10A..120A, 10A steps
+# Program 11: 2A, then 10A..100A in 10A increments
 # Program 12: 44V..51V, 1V steps
 # Program 13: 48V..58V, 1V steps
 # Program 24: 40V..54V (the LCD uses 0.1V precision)
@@ -40,6 +43,20 @@ class NumericControlDescription:
 # Program 31: 48V..60V, 0.1V steps
 # Program 33/34: 5..900 min, 5 min steps
 # Program 35: 0..90 days, 1 day steps
+MAX_MAINS_CHARGE_VALUES: tuple[float, ...] = (
+    2,
+    10,
+    20,
+    30,
+    40,
+    50,
+    60,
+    70,
+    80,
+    90,
+    100,
+)
+
 NUMERIC_CONTROLS: tuple[NumericControlDescription, ...] = (
     NumericControlDescription(
         "maximumChargingCurrentSetting",
@@ -49,6 +66,16 @@ NUMERIC_CONTROLS: tuple[NumericControlDescription, ...] = (
         120,
         10,
         "A",
+    ),
+    NumericControlDescription(
+        "maximumMainsChargingCurrentSetting",
+        "Maximum Utility Charging Current",
+        "mdi:transmission-tower-import",
+        2,
+        100,
+        1,
+        "A",
+        MAX_MAINS_CHARGE_VALUES,
     ),
     NumericControlDescription(
         "batteryRechargeVoltageSetting",
@@ -201,6 +228,25 @@ def _decimal_places(step: float) -> int:
     return len(text.rsplit(".", 1)[1])
 
 
+def _remove_legacy_numeric_select(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    station_id: str,
+    device_id: str,
+) -> None:
+    """Remove the old utility-charge-current select after converting to number."""
+    registry = er.async_get(hass)
+    legacy_unique_id = (
+        f"{DOMAIN}_{station_id}_{device_id}_maximum_mains_charging_current"
+    )
+    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if (
+            registry_entry.domain == "select"
+            and registry_entry.unique_id == legacy_unique_id
+        ):
+            registry.async_remove(registry_entry.entity_id)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -217,6 +263,8 @@ async def async_setup_entry(
     for device_id, coordinator in device_coordinators.items():
         device_name = (coordinator.device_meta or {}).get("name") or device_id
         settings = (coordinator.data or {}).get("settings") or {}
+
+        _remove_legacy_numeric_select(hass, entry, station_id, device_id)
 
         for description in NUMERIC_CONTROLS:
             if not _has_setting(settings, description.key):
@@ -296,6 +344,16 @@ class SolarOfThingsNumericSettingNumber(CoordinatorEntity, NumberEntity):
             raise ValueError(
                 f"{self._description.name} must be between "
                 f"{minimum:g} and {maximum:g} {self._description.unit}"
+            )
+
+        allowed_values = self._description.allowed_values
+        if allowed_values is not None and not any(
+            isclose(requested, allowed, abs_tol=1e-7) for allowed in allowed_values
+        ):
+            allowed_text = ", ".join(f"{item:g}" for item in allowed_values)
+            raise ValueError(
+                f"{self._description.name} must be one of: "
+                f"{allowed_text} {self._description.unit}"
             )
 
         steps = (requested - minimum) / step
