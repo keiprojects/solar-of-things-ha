@@ -6,7 +6,6 @@ from typing import Any
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -15,75 +14,21 @@ from .telemetry import PROTOCOL_SCHEMA
 
 _TRANSLATION_KEYS: dict[str, str] = {
     "pvInputPower": "pv_input_power",
+    "acOutputActivePower": "ac_output_active_power",
     "batteryDischargeCurrent": "battery_discharge_current",
     "batteryChargingCurrent": "battery_charging_current",
     "batteryVoltage": "battery_voltage",
     "batteryPower": "battery_power",
     "batterySOC": "battery_soc",
+    "feedInPower": "feed_in_power",
     "gridPower": "grid_power",
     "loadPower": "load_power",
+    "monthly_pv_generated": "monthly_pv_generated",
+    "monthly_grid_import": "monthly_grid_import",
+    "monthly_total_consumption": "monthly_total_consumption",
+    "monthly_solar_percentage": "monthly_solar_percentage",
 }
 
-# Dashboard-friendly canonical sensors that are intentionally exposed.
-# AC Output Power is omitted because Load Power represents the same active load
-# for this inverter. Grid Feed-in is also omitted because this installation uses
-# Grid Import Power as its useful grid-flow sensor.
-IMPORTANT_CANONICAL_SENSOR_KEYS: tuple[str, ...] = (
-    "pvInputPower",
-    "loadPower",
-    "gridPower",
-    "batteryPower",
-    "batteryVoltage",
-    "batterySOC",
-    "batteryChargingCurrent",
-    "batteryDischargeCurrent",
-)
-
-# Essential raw measurements in addition to the canonical dashboard sensors.
-IMPORTANT_PROTOCOL_SENSOR_KEYS: tuple[str, ...] = (
-    "pvVoltage",
-    "pvCurrent",
-    "outputVoltage",
-    "outputLoadPercent",
-    "acInputVoltage",
-    "mode",
-    "inverterTemperature",
-    "pvGeneratedEnergyOfDay",
-    "tqfMonthlyElectricityGeneration",
-    "tqfYearlyElectricityGeneration",
-    "pvGeneratedEnergyOfTotal",
-    "statusCode",
-)
-
-# Compact System Statuses set. These retain the operational/alarm information
-# that is useful for monitoring without bringing back the full raw protocol
-# schema and its hundreds of rarely-used entities.
-SYSTEM_STATUS_SENSOR_KEYS: tuple[str, ...] = (
-    "batteryStatus",
-    "solarChargingSwitch",
-    "acChargingSwitch",
-    "chargingMainSwitch",
-    "gridConnectionSign",
-    "doesTheMachineHaveAnOutput",
-    "fan1Status",
-    "fan2Status",
-    "lowBatteryAlarm",
-    "batteryNotConnected",
-    "abnormalFanSpeed",
-    "abnormalTemperatureSensor",
-    "inputVoltageTooHigh",
-    "bmsCommunicationNormal",
-    "bmsLowBatteryAlarmFlag",
-    "bmsLowPowerFaultFlag",
-)
-
-EXPOSED_PROTOCOL_SENSOR_KEYS: tuple[str, ...] = (
-    *IMPORTANT_PROTOCOL_SENSOR_KEYS,
-    *SYSTEM_STATUS_SENSOR_KEYS,
-)
-
-# These canonical measurements already represent their corresponding raw keys,
-# so the raw protocol copies should never be created as extra entities.
 _CANONICAL_RAW_KEYS = {
     "batteryVoltage",
     "batteryChargingCurrent",
@@ -165,7 +110,7 @@ def _apply_measurement_metadata(entity: SensorEntity, unit: str, key: str) -> No
 
 
 def _telemetry_attributes(coordinator) -> dict[str, Any]:
-    """Expose cloud polling diagnostics without separate debug entities."""
+    """Expose polling diagnostics without creating high-churn debug entities."""
     time_series = (coordinator.data or {}).get("time_series") or {}
     attributes: dict[str, Any] = {
         "telemetry_source": time_series.get("source"),
@@ -179,61 +124,6 @@ def _telemetry_attributes(coordinator) -> dict[str, Any]:
     return attributes
 
 
-def _remove_obsolete_telemetry_entities(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    station_id: str,
-    device_ids: list[str],
-) -> None:
-    """Remove previously-created raw/duplicate telemetry entities from registry.
-
-    Parameter-setting sensors are deliberately excluded from this cleanup. The
-    number/select/switch control platforms are separate and are not touched.
-    """
-    registry = er.async_get(hass)
-    entries = er.async_entries_for_config_entry(registry, entry.entry_id)
-
-    allowed_protocol = set(EXPOSED_PROTOCOL_SENSOR_KEYS)
-    obsolete_canonical = {"acOutputActivePower", "feedInPower"}
-    obsolete_station_monthly = {
-        "monthly_pv_generated",
-        "monthly_grid_import",
-        "monthly_total_consumption",
-        "monthly_solar_percentage",
-    }
-
-    for registry_entry in entries:
-        if registry_entry.domain != "sensor":
-            continue
-
-        unique_id = registry_entry.unique_id
-        should_remove = False
-
-        for device_id in device_ids:
-            protocol_prefix = f"{DOMAIN}_{station_id}_{device_id}_protocol_"
-            if unique_id.startswith(protocol_prefix):
-                key = unique_id[len(protocol_prefix) :]
-                if key not in allowed_protocol:
-                    should_remove = True
-                break
-
-            for key in obsolete_canonical:
-                if unique_id == f"{DOMAIN}_{station_id}_{device_id}_{key}":
-                    should_remove = True
-                    break
-            if should_remove:
-                break
-
-        if not should_remove:
-            for key in obsolete_station_monthly:
-                if unique_id == f"{DOMAIN}_{station_id}_{key}":
-                    should_remove = True
-                    break
-
-        if should_remove:
-            registry.async_remove(registry_entry.entity_id)
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -242,15 +132,15 @@ async def async_setup_entry(
     data = hass.data[DOMAIN][entry.entry_id]
     station_id: str = data["station_id"]
     device_coordinators = data["device_coordinators"]
+    station_coordinator = data["station_coordinator"]
 
     entities: list[SensorEntity] = []
 
     for device_id, coordinator in device_coordinators.items():
         device_name = (coordinator.device_meta or {}).get("name") or device_id
 
-        for key in IMPORTANT_CANONICAL_SENSOR_KEYS:
-            definition = SENSOR_DEFINITIONS.get(key)
-            if not definition:
+        for key, definition in SENSOR_DEFINITIONS.items():
+            if key.startswith("monthly_"):
                 continue
             entities.append(
                 SolarOfThingsCanonicalSensor(
@@ -263,11 +153,8 @@ async def async_setup_entry(
                 )
             )
 
-        for key in EXPOSED_PROTOCOL_SENSOR_KEYS:
+        for key, metadata in PROTOCOL_SCHEMA.items():
             if key in _CANONICAL_RAW_KEYS:
-                continue
-            metadata = PROTOCOL_SCHEMA.get(key)
-            if not metadata:
                 continue
             entities.append(
                 SolarOfThingsProtocolSensor(
@@ -280,9 +167,6 @@ async def async_setup_entry(
                 )
             )
 
-        # Keep every parameter-setting readback. These are intentionally not
-        # part of the telemetry pruning because they support inverter setup and
-        # make the writable controls easy to verify.
         settings = _normalise_settings((coordinator.data or {}).get("settings"))
         for key, metadata in settings.items():
             entities.append(
@@ -296,12 +180,17 @@ async def async_setup_entry(
                 )
             )
 
-    _remove_obsolete_telemetry_entities(
-        hass,
-        entry,
-        station_id,
-        list(device_coordinators),
-    )
+    if station_coordinator:
+        for key, definition in SENSOR_DEFINITIONS.items():
+            if key.startswith("monthly_"):
+                entities.append(
+                    SolarOfThingsStationMonthlySensor(
+                        station_coordinator,
+                        station_id,
+                        key,
+                        definition,
+                    )
+                )
 
     async_add_entities(entities)
 
@@ -456,3 +345,39 @@ class SolarOfThingsSettingSensor(_DeviceSensor):
             "value_type": entry.get("valueTypeDict"),
             "read_only": True,
         }
+
+
+class SolarOfThingsStationMonthlySensor(CoordinatorEntity, SensorEntity):
+    def __init__(
+        self,
+        coordinator,
+        station_id: str,
+        sensor_key: str,
+        definition: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator)
+        self._station_id = station_id
+        self._sensor_key = sensor_key
+        self._attr_has_entity_name = True
+        self._attr_translation_key = _TRANSLATION_KEYS.get(sensor_key)
+        if not self._attr_translation_key:
+            self._attr_name = definition["name"]
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_{sensor_key}"
+        self._attr_icon = definition.get("icon")
+        _apply_measurement_metadata(self, definition.get("unit", ""), sensor_key)
+        if definition.get("unit") == "kWh":
+            self._attr_state_class = SensorStateClass.TOTAL
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._station_id)},
+            "name": f"Solar Station {self._station_id}",
+            "manufacturer": "Siseli",
+            "model": "Station",
+        }
+
+    @property
+    def native_value(self):
+        monthly = (self.coordinator.data or {}).get("monthly") or {}
+        return _number(monthly.get(self._sensor_key))
