@@ -49,19 +49,6 @@ CHARGER_PRIORITY_TO_VALUE: dict[str, int] = {
 }
 
 
-# POW-HVM6.2KP program 11 is not a regular number sequence:
-# it allows 2A, then 10A..100A in 10A increments. A SelectEntity prevents
-# Home Assistant from offering invalid values such as 12A or 22A.
-MAX_MAINS_CHARGE_VALUES = [2, *range(10, 101, 10)]
-MAX_MAINS_CHARGE_BY_VALUE: dict[int, str] = {
-    value: f"{value} A" for value in MAX_MAINS_CHARGE_VALUES
-}
-MAX_MAINS_CHARGE_OPTIONS = list(MAX_MAINS_CHARGE_BY_VALUE.values())
-MAX_MAINS_CHARGE_TO_VALUE: dict[str, int] = {
-    option: value for value, option in MAX_MAINS_CHARGE_BY_VALUE.items()
-}
-
-
 def _settings_containers(settings: Any) -> list[dict[str, Any]]:
     """Return possible setting containers in preferred order."""
     if not isinstance(settings, dict):
@@ -83,12 +70,7 @@ def _settings_containers(settings: Any) -> list[dict[str, Any]]:
 
 
 def _setting_details(settings: Any, key: str) -> tuple[Any, str | None]:
-    """Return a setting's raw value and Siseli valueDisplay.
-
-    The server-provided valueDisplay is authoritative for enum labels. This
-    prevents an inverter-specific numeric value from being shown with the wrong
-    Home Assistant label.
-    """
+    """Return a setting's raw value and Siseli valueDisplay."""
     for container in _settings_containers(settings):
         entry = container.get(key)
         if entry is None:
@@ -137,6 +119,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    """Set up fixed-choice inverter controls."""
     data = hass.data[DOMAIN][entry.entry_id]
     api = data["api"]
     station_id: str = data["station_id"]
@@ -158,13 +141,6 @@ async def async_setup_entry(
         if _has_setting(settings, "chargerPrioritySetting"):
             entities.append(
                 SolarOfThingsChargerPrioritySelect(
-                    api, coordinator, station_id, device_id, device_name
-                )
-            )
-
-        if _has_setting(settings, "maximumMainsChargingCurrentSetting"):
-            entities.append(
-                SolarOfThingsMaximumMainsChargingCurrentSelect(
                     api, coordinator, station_id, device_id, device_name
                 )
             )
@@ -277,53 +253,6 @@ class SolarOfThingsChargerPrioritySelect(_BaseSelect):
             self._api,
             self._device_id,
             "chargerPrioritySetting",
-            value,
-        )
-        await self.coordinator.async_request_refresh()
-
-
-class SolarOfThingsMaximumMainsChargingCurrentSelect(_BaseSelect):
-    """Select entity for the inverter's non-linear utility-charge current list."""
-
-    def __init__(
-        self,
-        api,
-        coordinator,
-        station_id: str,
-        device_id: str,
-        device_name: str,
-    ) -> None:
-        super().__init__(api, coordinator, station_id, device_id, device_name)
-        self._attr_name = f"{device_name} Maximum Utility Charging Current"
-        self._attr_unique_id = (
-            f"{DOMAIN}_{station_id}_{device_id}_maximum_mains_charging_current"
-        )
-        self._attr_options = MAX_MAINS_CHARGE_OPTIONS
-        self._attr_icon = "mdi:transmission-tower-import"
-
-    @property
-    def current_option(self) -> str | None:
-        settings = (self.coordinator.data or {}).get("settings") or {}
-        raw, _display = _setting_details(
-            settings, "maximumMainsChargingCurrentSetting"
-        )
-        try:
-            return MAX_MAINS_CHARGE_BY_VALUE.get(int(raw))
-        except (TypeError, ValueError):
-            return None
-
-    async def async_select_option(self, option: str) -> None:
-        value = MAX_MAINS_CHARGE_TO_VALUE.get(option)
-        if value is None:
-            raise ValueError(
-                f"Unknown maximum utility charging current: {option!r}"
-            )
-
-        await self.hass.async_add_executor_job(
-            write_setting,
-            self._api,
-            self._device_id,
-            "maximumMainsChargingCurrentSetting",
             value,
         )
         await self.coordinator.async_request_refresh()
