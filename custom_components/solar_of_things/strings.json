@@ -48,6 +48,17 @@
       "reauth_successful": "Re-authentication successful."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Local Bluetooth telemetry",
+        "description": "Optional experimental local mode for a WiFi Relabs / Solar Plug-RWB1 collector. Enter the BLE address shown by Home Assistant (for example AA:BB:CC:DD:EE:FF). When configured, live inverter telemetry is requested locally every 5 seconds; cloud telemetry remains the fallback and is still used for station summaries/settings.",
+        "data": {
+          "ble_address": "WiFi Relabs BLE address"
+        }
+      }
+    }
+  },
   "entity": {
     "number": {
       "battery_charge_limit": {
