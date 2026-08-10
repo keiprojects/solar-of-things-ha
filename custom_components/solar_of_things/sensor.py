@@ -256,30 +256,14 @@ class SolarOfThingsProtocolSensor(_DeviceSensor):
         sensor_key: str,
         metadata: dict[str, Any],
     ) -> None:
-        super().__init__(coordinator)
-        self._station_id = station_id
-        self._device_id = device_id
-        self._device_name = device_name
+        super().__init__(coordinator, station_id, device_id, device_name)
         self._sensor_key = sensor_key
         self._metadata = metadata
-        self._attr_has_entity_name = True
         self._attr_name = metadata.get("name") or sensor_key
         self._attr_unique_id = f"{DOMAIN}_{station_id}_{device_id}_protocol_{sensor_key}"
 
         if metadata.get("type") == "Numeric":
             _apply_measurement_metadata(self, metadata.get("unit") or "", sensor_key)
-
-    @property
-    def device_info(self):
-        return {
-            "identifiers": {(DOMAIN, self._device_id)},
-            "name": self._device_name,
-            "manufacturer": "Siseli",
-            "model": (self.coordinator.data.get("device_meta") or {}).get("model")
-            if self.coordinator.data
-            else None,
-            "via_device": (DOMAIN, self._station_id),
-        }
 
     @property
     def native_value(self):
