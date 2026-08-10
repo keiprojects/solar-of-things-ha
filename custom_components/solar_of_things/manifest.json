@@ -5,10 +5,6 @@
     "@keiprojects"
   ],
   "config_flow": true,
-  "dependencies": [
-    "bluetooth",
-    "bluetooth_adapters"
-  ],
   "documentation": "https://github.com/keiprojects/solar-of-things-ha",
   "homeassistant": "2026.6.0",
   "integration_type": "hub",
@@ -17,5 +13,5 @@
   "requirements": [
     "pycryptodome>=3.9.0"
   ],
-  "version": "2.6.2"
+  "version": "2.6.3"
 }
